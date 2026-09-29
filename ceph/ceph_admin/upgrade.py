@@ -1,5 +1,6 @@
 """Module that interfaces with ceph orch upgrade CLI."""
 
+import shlex
 from datetime import datetime, timedelta
 from json import JSONDecodeError, loads
 from time import sleep
@@ -13,6 +14,7 @@ from ceph.waiter import WaitUntil
 from utility.log import Log
 
 from ..utils import get_daemon_versions
+from .bootstrap import resolve_registry_login
 from .common import config_dict_to_string
 from .typing_ import OrchProtocol
 
@@ -51,6 +53,7 @@ class UpgradeMixin:
                     services: "mon,mgr"     # Optional: comma-separated service names
 
         """
+        self._login_for_upgrade_image(config)
         cmd = ["ceph", "orch"]
 
         if config and config.get("base_cmd_args"):
@@ -103,6 +106,54 @@ class UpgradeMixin:
                 cmd.append("--automatically-accept-license")
 
         return self.shell(args=cmd)
+
+    def _login_for_upgrade_image(self: OrchProtocol, config: Dict):
+        """Log the cluster into the registry that holds the upgrade image.
+
+        Bootstrap stores one registry login, chosen for the baseline image.
+        An upgrade image on a different registry (for example 8.1 on
+        registry.redhat.io, then 9.2 on registry.stage.redhat.io) is pulled
+        with that stored login and fails with 401. Log in for the target
+        image before ``orch upgrade start``.
+        """
+        product = str(config.get("product") or "")
+        if product not in ("redhat", "rh"):
+            return
+
+        image = config.get("container_image") or ""
+        image_host = image.split("/")[0] if "/" in image else ""
+        if not image_host:
+            return
+
+        creds = resolve_registry_login(
+            image_host,
+            product=product,
+            build_type=config.get("build_type") or "rc",
+        )
+        LOG.info(
+            "Upgrade image host is %r; logging into %r",
+            image_host,
+            creds["registry-url"],
+        )
+        # Store the login for later daemon deploys, and log one host in now.
+        self.shell(
+            args=[
+                " ".join(
+                    [
+                        "ceph",
+                        "cephadm",
+                        "registry-login",
+                        shlex.quote(creds["registry-url"]),
+                        shlex.quote(creds["registry-username"]),
+                        shlex.quote(creds["registry-password"]),
+                    ]
+                )
+            ]
+        )
+        # The mgr distributes the new login in the background. Log in on each
+        # node before the upgrade pull so it does not race that distribution.
+        for node in self.cluster.get_nodes(ignore="client"):
+            self.registry_login(node=node, args=creds, long_running=True)
 
     def upgrade_status(self: OrchProtocol, timeout: int = 600, interval: int = 10):
         """

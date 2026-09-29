@@ -50,36 +50,21 @@ def _detect_registry_tier(registry: str, build_type: str) -> str:
     return "cdn" if build_type in ("released", "cdn") else "stage"
 
 
-def construct_registry(
-    cls,
+def resolve_registry_login(
     registry: str,
-    json_file: bool = False,
     product: str = "redhat",
     build_type: str = "released",
-):
-    """
-    Construct registry credentials for bootstrapping cluster
+) -> Dict:
+    """Return the registry login for an image host.
+
+    The hostname selects the credential tier. For RH, the login URL is the
+    ``registry`` field of that tier, so a quay.io image still logs into
+    registry.stage.redhat.io. For IBM, the login URL is the image host.
 
     Args:
-        cls (CephAdmin): class object
-        registry (Str): registry name
-        json_file (Bool): registry credentials in JSON file (default:False)
+        registry: image registry host, for example registry.redhat.io
         product: ceph product - ibm/redhat
         build_type: CLI build type (released|cdn|stage|nightly etc.)
-
-    Registry tier is chosen from the registry hostname when it matches a known
-    RH/IBM host (cdn, stage, preprod); otherwise build_type is used
-    (released/cdn -> cdn, else stage).
-
-    Example::
-
-        json_file:
-            - False : Constructs registry credentials for bootstrap
-            - True  : Creates file with registry name attached with it,
-                      and saved as /tmp/<registry>.json file.
-
-    Returns:
-        constructed string of registry credentials ( Str )
     """
     _vendor = "ibm" if "ibm" in product else "rh"
 
@@ -119,11 +104,47 @@ def construct_registry(
         registry_url = _reg
     else:
         registry_url = cdn_cred.get("registry") or _reg
-    reg_args = {
+    return {
         "registry-url": registry_url,
         "registry-username": cdn_cred.get("username"),
         "registry-password": cdn_cred.get("password"),
     }
+
+
+def construct_registry(
+    cls,
+    registry: str,
+    json_file: bool = False,
+    product: str = "redhat",
+    build_type: str = "released",
+):
+    """
+    Construct registry credentials for bootstrapping cluster
+
+    Args:
+        cls (CephAdmin): class object
+        registry (Str): registry name
+        json_file (Bool): registry credentials in JSON file (default:False)
+        product: ceph product - ibm/redhat
+        build_type: CLI build type (released|cdn|stage|nightly etc.)
+
+    Registry tier is chosen from the registry hostname when it matches a known
+    RH/IBM host (cdn, stage, preprod); otherwise build_type is used
+    (released/cdn -> cdn, else stage).
+
+    Example::
+
+        json_file:
+            - False : Constructs registry credentials for bootstrap
+            - True  : Creates file with registry name attached with it,
+                      and saved as /tmp/<registry>.json file.
+
+    Returns:
+        constructed string of registry credentials ( Str )
+    """
+    reg_args = resolve_registry_login(
+        registry, product=product, build_type=build_type
+    )
     if json_file:
         reg = dict((k.lstrip("registry-"), v) for k, v in reg_args.items())
 
@@ -357,9 +378,9 @@ class BootstrapMixin:
         registry_url = args.pop("registry-url", None)
         registry_json = args.pop("registry-json", None)
 
-        # Auto-detect the image host for IBM builds (preprod.icr.io / cp.stg.icr.io).
-        # For RH builds the image may be pulled from quay.io via a lab mirror; the
-        # login target is the stage registry in .cephci.yaml, NOT the pull host.
+        # The image host selects which credential tier to use. For RH the
+        # login URL still comes from that tier in the credential file, so a
+        # quay.io image logs into registry.stage.redhat.io rather than quay.io.
         if custom_image and isinstance(custom_image, str):
             image_registry = custom_image.split("/")[0]
         else:
@@ -369,12 +390,10 @@ class BootstrapMixin:
             registry_url = image_registry
             logger.info(f"IBM build: using image host {registry_url!r} as registry-url")
         else:
-            # Pass empty string so construct_registry() falls back to
-            # cdn_cred.get("registry") — i.e. registry.stage.redhat.io from .cephci.yaml.
-            registry_url = ""
+            registry_url = image_registry
             logger.info(
                 f"RH build: image host is {image_registry!r}; "
-                "registry-url will be taken from credential file"
+                "registry-url will be taken from the matching credential tier"
             )
 
         if registry_url or manifest_obj.product in ("ibm", "redhat"):
