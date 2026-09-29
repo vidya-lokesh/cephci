@@ -114,7 +114,8 @@ class UpgradeMixin:
         An upgrade image on a different registry (for example 8.1 on
         registry.redhat.io, then 9.2 on registry.stage.redhat.io) is pulled
         with that stored login and fails with 401. Log in for the target
-        image before ``orch upgrade start``.
+        image before ``orch upgrade check`` and ``orch upgrade start``,
+        because both commands pull that image.
         """
         product = str(config.get("product") or "")
         if product not in ("redhat", "rh"):
@@ -238,6 +239,13 @@ class UpgradeMixin:
         Returns:
             status (Dict)
         """
+        # upgrade check pulls the target image, so the stage login has to
+        # be in place before this command. start_upgrade logs in again.
+        login_cfg = dict(self.config or {})
+        if image:
+            login_cfg["container_image"] = image
+        self._login_for_upgrade_image(login_cfg)
+
         out, _ = self.shell(
             args=["ceph", "orch", "upgrade", "check", f"--image {image}"]
         )
