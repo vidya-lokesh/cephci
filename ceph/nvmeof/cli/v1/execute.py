@@ -42,6 +42,11 @@ class ExecuteCommandMixin:
             base_cmd_args.update({"server-port": self.port})
 
         cmd_args = kwargs.get("args", {})
+        # Image size flag: --rbd-image-size is 9.2+ / ceph nvmeof v2.
+        # Podman nvmeof-cli (Squid/8.1, CLI 1.4.x) only accepts --size.
+        if "rbd-image-size" in cmd_args:
+            cmd_args["size"] = cmd_args.pop("rbd-image-size")
+
         command = " ".join(
             [
                 self.BASE_CMD,
